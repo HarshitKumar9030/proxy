@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <title>Proxy Console</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="viewport">
+    <aside class="sidebar" aria-label="Primary">
+      <div class="logo-block">
+        <div class="glyph" aria-hidden="true">PX</div>
+        <h1 class="app-name">Proxy Console</h1>
+      </div>
+      <nav class="meta-cards">
+        <div class="meta-card">
+          <div class="label">Requests</div>
+          <div class="value"><%= stats.total %></div>
+        </div>
+        <div class="meta-card">
+          <div class="label">Hosts</div>
+          <div class="value"><%= stats.distinct_hosts %></div>
+        </div>
+        <div class="meta-card">
+          <div class="label">Avg ms</div>
+          <div class="value"><%= (stats.avg_duration||0).toFixed(1) %></div>
+        </div>
+      </nav>
+      <div class="block group">
+        <form id="proxyForm" class="request-form" autocomplete="off">
+          <label for="target" class="field-title">Target URL</label>
+          <div class="row">
+            <input id="target" type="url" placeholder="https://domain.tld/path" required />
+            <button type="submit" class="btn primary" title="Open proxied">Go</button>
+          </div>
+          <p class="note">Uses <code>/proxy?target=</code></p>
+        </form>
+      </div>
+      <div class="block group">
+        <label for="filter" class="field-title">Filter History</label>
+        <div class="row">
+          <input id="filter" type="text" placeholder="host / url / status" />
+          <button id="clearFilter" class="btn ghost" title="Clear">×</button>
+        </div>
+      </div>
+      <div class="block foot-actions">
+        <button id="themeToggle" class="btn outline full" title="Toggle dark / light">Toggle Theme</button>
+        <a class="btn ghost full" href="/api/history" target="_blank">History API</a>
+        <p class="backend tiny" id="backendInfo">…</p>
+      </div>
+      <div class="grow"></div>
+      <footer class="site-foot tiny">&copy; <span id="year"></span> VM Proxy</footer>
+    </aside>
+    <main class="content" aria-label="History">
+      <header class="content-head">
+        <h2>Recent History</h2>
+        <div class="refresh-hint tiny" id="refreshStatus">Auto-refresh 10s</div>
+      </header>
+      <section class="table-zone">
+        <table id="historyTable" class="history-table" role="grid" aria-label="Proxy history table">
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">M</th>
+              <th scope="col">Status</th>
+              <th scope="col">Latency</th>
+              <th scope="col">Host</th>
+              <th scope="col">URL</th>
+              <th scope="col" class="center">↻</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% recent.forEach(r => { %>
+              <tr>
+                <td><%= new Date(r.created_at).toLocaleTimeString() %></td>
+                <td><%= r.method %></td>
+                <td><span class="badge <%= r.status >=200 && r.status < 300 ? 'good' : 'bad' %>"><%= r.status %></span></td>
+                <td><%= r.duration_ms %> ms</td>
+                <td><%= r.target_host %></td>
+                <td class="clip" title="<%= r.url %>"><%= r.url %></td>
+                <td class="center"><button data-url="<%= r.url %>" class="mini-btn" title="Reopen">↻</button></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+<script>
+  const yearSpan = document.getElementById('year');
+  yearSpan.textContent = new Date().getFullYear();
+  const form = document.getElementById('proxyForm');
+  const targetInput = document.getElementById('target');
+  const filterInput = document.getElementById('filter');
+  const backendInfo = document.getElementById('backendInfo');
+  const refreshStatus = document.getElementById('refreshStatus');
+
+  // Backend availability hint
+  fetch('/api/history?limit=1').then(()=>backendInfo.textContent='History backend active').catch(()=>backendInfo.textContent='History backend unavailable');
+
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    const url = targetInput.value.trim();
+    if(!url) return;
+    window.open(`/proxy?target=${encodeURIComponent(url)}`, '_blank');
+    targetInput.select();
+  });
+
+  document.addEventListener('click', e => {
+    const reopen = e.target.closest('button[data-url]');
+    if(reopen){
+      const u = reopen.getAttribute('data-url');
+      window.open(`/proxy?target=${encodeURIComponent(u)}`, '_blank');
+    }
+    if(e.target.id === 'clearFilter') { filterInput.value=''; applyFilter(); }
+    if(e.target.id === 'themeToggle') toggleTheme();
+  });
+
+  function applyFilter(){
+    const q = filterInput.value.toLowerCase();
+    const rows = document.querySelectorAll('#historyTable tbody tr');
+    rows.forEach(r => {
+      if(!q){ r.hidden=false; return; }
+      r.hidden = !r.textContent.toLowerCase().includes(q);
+    });
+  }
+  filterInput.addEventListener('input', applyFilter);
+
+  async function refresh(){
+    refreshStatus.textContent = 'Refreshing…';
+    try {
+      const res = await fetch('/api/history?limit=200');
+      const data = await res.json();
+      const tbody = document.querySelector('#historyTable tbody');
+      const q = filterInput.value.toLowerCase();
+      tbody.innerHTML = data.map(r => {
+        const rowHtml = `<tr>
+          <td>${new Date(r.created_at).toLocaleTimeString()}</td>
+          <td>${r.method}</td>
+            <td><span class="badge ${r.status>=200 && r.status<300 ? 'good':'bad'}">${r.status}</span></td>
+          <td>${r.duration_ms} ms</td>
+          <td>${r.target_host}</td>
+          <td class=\"clip\" title=\"${r.url}\">${r.url}</td>
+          <td class=\"center\"><button data-url=\"${r.url}\" class=\"mini-btn\" title=\"Reopen\">↻</button></td>
+        </tr>`;
+        return !q || rowHtml.toLowerCase().includes(q) ? rowHtml : '';
+      }).join('');
+    } catch(_){}
+    refreshStatus.textContent = 'Auto-refresh 10s';
+  }
+  setInterval(refresh, 10000);
+
+  // THEME: prefer saved > system > default dark
+  const root = document.documentElement;
+  const saved = localStorage.getItem('theme');
+  if(saved){
+    root.setAttribute('data-theme', saved);
+  } else if(window.matchMedia('(prefers-color-scheme: light)').matches){
+    root.setAttribute('data-theme','light');
+  }
+  function toggleTheme(){
+    const current = root.getAttribute('data-theme');
+    const next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    localStorage.setItem('theme', next);
+  }
+</script>
+</body>
+</html>
