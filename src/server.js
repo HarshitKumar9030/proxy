@@ -48,7 +48,8 @@ app.set('trust proxy', 1);
 // Security and performance middleware
 app.use(helmet({
   contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false
+  crossOriginEmbedderPolicy: false,
+  frameguard: false  // Disable X-Frame-Options to avoid conflicts with proxied content
 }));
 app.use(compression());
 app.use(morgan('tiny'));
@@ -179,6 +180,10 @@ function handleProxy(req, res, target, { raw = false, insecure = false } = {}) {
               .replace(/;\s*SameSite=[^;]+/i, '; SameSite=Lax')
       );
     }
+    
+    // Remove problematic headers that can cause conflicts
+    delete headers['x-frame-options'];
+    delete headers['X-Frame-Options'];
     
     // Handle redirects
     if (headers.location) {
