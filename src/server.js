@@ -6,6 +6,7 @@ import compression from 'compression';
 import morgan from 'morgan';
 import cors from 'cors';
 import { createProxyMiddleware } from 'http-proxy-middleware';
+import { Buffer } from 'buffer';
 import { initHistoryStore, recordHistory, getRecentHistory, getStats, getMode } from './historyStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -68,34 +69,51 @@ app.use('/proxy', async (req, res, next) => {
     const proxy = createProxyMiddleware({
       target: targetUrl.origin,
       changeOrigin: true,
-      selfHandleResponse: false,
+      selfHandleResponse: true, // We'll optionally modify HTML
       logLevel: 'warn',
       onProxyRes: (proxyRes, req2, res2) => {
-        // Rewrite redirect Location headers to stay within proxy
+        const chunks = [];
+        const isHtml = /text\/html/i.test(proxyRes.headers['content-type'] || '');
+        // Rewrite redirect Location headers to remain proxied
         const loc = proxyRes.headers['location'];
         if (loc && (loc.startsWith('http://') || loc.startsWith('https://') || loc.startsWith('/'))) {
           try {
             let absolute;
-            if (loc.startsWith('/')) {
-              absolute = targetUrl.origin + loc;
-            } else {
-              absolute = loc;
-            }
+            if (loc.startsWith('/')) absolute = targetUrl.origin + loc; else absolute = loc;
             proxyRes.headers['location'] = '/proxy?target=' + encodeURIComponent(absolute);
-          } catch (e) {
-            // ignore rewrite errors
-          }
+          } catch (_) {}
         }
-        const end = process.hrtime.bigint();
-        const durationMs = Number(end - req._startAt) / 1_000_000;
-        recordHistory({
-          method: req.method,
-          url: target,
+
+        proxyRes.on('data', d => {
+          if (isHtml) chunks.push(d); else res2.write(d);
+        });
+        proxyRes.on('end', () => {
+          const end = process.hrtime.bigint();
+          const durationMs = Number(end - req._startAt) / 1_000_000;
+          recordHistory({
+            method: req.method,
+            url: target,
             target_host: targetUrl.host,
-          status: proxyRes.statusCode,
-          duration_ms: Math.round(durationMs),
-          user_agent: req.headers['user-agent'] || '',
-          ip: req.ip
+            status: proxyRes.statusCode,
+            duration_ms: Math.round(durationMs),
+            user_agent: req.headers['user-agent'] || '',
+            ip: req.ip
+          });
+
+          if (!isHtml) {
+            return res2.end();
+          }
+          try {
+            let body = Buffer.concat(chunks).toString('utf8');
+            body = rewriteHtml(body, targetUrl);
+            // Remove content-length (changed)
+            delete proxyRes.headers['content-length'];
+            res2.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+            res2.end(body);
+          } catch (e) {
+            res2.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+            res2.end(Buffer.concat(chunks));
+          }
         });
       },
       onError: (err, req2, res2) => {
@@ -119,6 +137,40 @@ app.use('/proxy', async (req, res, next) => {
     return res.status(400).json({ error: 'Invalid target URL' });
   }
 });
+
+// ---- HTML Rewriting Helpers ----
+function absolutize(urlVal, base) {
+  try { return new URL(urlVal, base).href; } catch { return urlVal; }
+}
+function shouldRewrite(u) {
+  if (!u) return false;
+  if (u.startsWith('#')) return false;
+  if (u.startsWith('data:')) return false;
+  if (u.startsWith('javascript:')) return false;
+  if (u.startsWith('/proxy?target=')) return false;
+  return true;
+}
+function proxify(u) { return '/proxy?target=' + encodeURIComponent(u); }
+function rewriteHtml(html, baseUrl) {
+  // Attributes: href, src, action
+  html = html.replace(/\b(href|src|action)=("|')(.*?)(\2)/gi, (m, attr, q, val) => {
+    if (!shouldRewrite(val)) return m;
+    const abs = absolutize(val, baseUrl);
+    return `${attr}=${q}${proxify(abs)}${q}`;
+  });
+  // Meta refresh
+  html = html.replace(/<meta[^>]*http-equiv=("|')refresh\1[^>]*>/gi, tag => {
+    return tag.replace(/content=("|')(\d+\s*;\s*url=)([^"']+)("|')/i, (m2, q, prefix, urlv, q2) => {
+      if (!shouldRewrite(urlv)) return m2;
+      const abs = absolutize(urlv, baseUrl);
+      return `content=${q}${prefix}${proxify(abs)}${q}`;
+    });
+  });
+  // Inject client-side interception script before </head>
+  const inject = `<script>(function(){if(window.__PX_INJECTED)return;window.__PX_INJECTED=1;const P='/proxy?target=';const abs=u=>{try{return new URL(u,location.href).href}catch(_){return u}};const prox=u=>P+encodeURIComponent(abs(u));['pushState','replaceState'].forEach(fn=>{const o=history[fn];history[fn]=function(s,t,u){if(u&&u.indexOf(P)!==0)u=prox(u);return o.call(this,s,t,u)}});const la=location.assign.bind(location);location.assign=function(u){la(prox(u))};const lr=location.replace.bind(location);location.replace=function(u){lr(prox(u))};document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(!a)return;if(a.target&&a.target!=='_self')return;const h=a.getAttribute('href');if(!h||h.startsWith('#')||h.startsWith('javascript:'))return;if(h.startsWith(P))return;e.preventDefault();location.assign(h);});})();</script>`;
+  if (/<\/head>/i.test(html)) html = html.replace(/<\/head>/i, inject + '</head>'); else html = inject + html;
+  return html;
+}
 
 // Simple health endpoint
 app.get('/healthz', (req, res) => {
