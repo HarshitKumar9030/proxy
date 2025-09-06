@@ -86,6 +86,16 @@ app.get('/browser', (req, res) => {
   res.render('browser', { recent: getRecentHistory(10) });
 });
 
+// Health check endpoint
+app.get('/healthz', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    mode: getMode()
+  });
+});
+
 // Fast proxy handler with optimized networking
 function handleProxy(req, res, target, { raw = false, insecure = false } = {}) {
   const startTime = process.hrtime.bigint();
@@ -274,6 +284,49 @@ function handleProxy(req, res, target, { raw = false, insecure = false } = {}) {
   proxyReq.end();
 }
 
+// Handle YouTube API endpoints and other relative requests
+app.use('/youtubei/*', (req, res) => {
+  const referer = req.headers.referer || '';
+  
+  // If coming from a proxied YouTube page, proxy to YouTube
+  if (referer.includes('localhost:2456/go/') && referer.includes('youtube')) {
+    const target = 'https://www.youtube.com' + req.originalUrl;
+    handleProxy(req, res, target, { raw: true });
+  } else {
+    res.status(404).json({ error: 'Not found' });
+  }
+});
+
+// Handle other common API paths
+app.use('/generate_204', (req, res) => {
+  const referer = req.headers.referer || '';
+  
+  if (referer.includes('localhost:2456/go/') && referer.includes('youtube')) {
+    const target = 'https://www.youtube.com' + req.originalUrl;
+    handleProxy(req, res, target, { raw: true });
+  } else {
+    res.status(404).json({ error: 'Not found' });
+  }
+});
+
+// Handle static assets (CSS, JS, fonts, etc.) with proper MIME types
+app.use('/s/*', (req, res) => {
+  const referer = req.headers.referer || '';
+  
+  if (referer.includes('localhost:2456/go/') && referer.includes('youtube')) {
+    const target = 'https://www.youtube.com' + req.originalUrl;
+    handleProxy(req, res, target, { raw: true });
+  } else {
+    res.status(404).json({ error: 'Not found' });
+  }
+});
+
+// Handle fonts.googleapis.com requests
+app.use('/fonts.googleapis.com/*', (req, res) => {
+  const target = 'https://fonts.googleapis.com' + req.originalUrl.replace('/fonts.googleapis.com', '');
+  handleProxy(req, res, target, { raw: true });
+});
+
 // Legacy proxy endpoint
 app.use('/proxy', (req, res) => {
   const t = req.query.target;
@@ -307,6 +360,15 @@ app.use('/go/:oid', (req, res) => {
   const base = '/go/' + oid;
   let rest = req.originalUrl.slice(base.length) || '/';
   if (!rest.startsWith('/')) rest = '/' + rest;
+  
+  // Check for double-encoded URLs and clean them up
+  if (rest.includes('/go/') && rest.includes('aHR0cHM6Ly8')) {
+    // This is a double-encoded URL, extract the inner part
+    const innerMatch = rest.match(/\/go\/[^\/]+(.+)/);
+    if (innerMatch) {
+      rest = innerMatch[1];
+    }
+  }
   
   const target = origin + rest;
   return handleProxy(req, res, target, { insecure: req.query.insecure === '1' });
@@ -366,7 +428,10 @@ function rewriteHtml(body, url) {
     body = body
       // Fix absolute URLs in href/src/action attributes (skip if already proxied)
       .replace(/\b(href|src|action)\s*=\s*["']https?:\/\/([^"']+)["']/gi, (match, attr, fullUrl) => {
-        if (fullUrl.includes('/go/')) return match; // Skip already proxied URLs
+        // Skip if URL is already proxied or contains proxy patterns
+        if (fullUrl.includes('/go/') || fullUrl.includes('aHR0cHM6Ly8') || fullUrl.includes('localhost:2456')) {
+          return match;
+        }
         try {
           const parsedUrl = new URL(fullUrl);
           return `${attr}="/go/${encodeOrigin(parsedUrl.origin)}${parsedUrl.pathname}${parsedUrl.search}"`;
@@ -376,12 +441,18 @@ function rewriteHtml(body, url) {
       })
       // Fix relative URLs starting with / (skip if already proxied)
       .replace(/\b(href|src|action)\s*=\s*["']\/([^"']*?)["']/gi, (match, attr, path) => {
-        if (path.startsWith('go/')) return match; // Skip already proxied URLs
+        // Skip if path is already proxied or contains proxy patterns
+        if (path.startsWith('go/') || path.includes('aHR0cHM6Ly8') || path.includes('localhost:2456')) {
+          return match;
+        }
         return `${attr}="/go/${originId}/${path}"`;
       })
       // Fix protocol-relative URLs (skip if already proxied)
       .replace(/\b(href|src|action)\s*=\s*["']\/\/([^"']+)["']/gi, (match, attr, relUrl) => {
-        if (relUrl.includes('/go/')) return match; // Skip already proxied URLs
+        // Skip if URL is already proxied or contains proxy patterns
+        if (relUrl.includes('/go/') || relUrl.includes('aHR0cHM6Ly8') || relUrl.includes('localhost:2456')) {
+          return match;
+        }
         try {
           const parsedUrl = new URL(`https://${relUrl}`);
           return `${attr}="/go/${encodeOrigin(parsedUrl.origin)}${parsedUrl.pathname}${parsedUrl.search}"`;
