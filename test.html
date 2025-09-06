@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Page</title>
+</head>
+<body>
+    <h1>Server Test</h1>
+    <p>If you can see this, the server is working!</p>
+    <div>
+        <a href="/browser">Go to Browser Interface</a>
+        <br>
+        <a href="/test">Go to Test API</a>
+        <br>
+        <a href="/?p=httpbin.org">Test Proxy with httpbin.org</a>
+    </div>
+    <script>
+        fetch('/test')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('result').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            })
+            .catch(e => {
+                document.getElementById('result').innerHTML = 'Error: ' + e.message;
+            });
+    </script>
+    <div id="result">Loading test result...</div>
+</body>
+</html>
