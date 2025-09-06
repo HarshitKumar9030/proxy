@@ -62,21 +62,36 @@ app.use('/proxy', async (req, res, next) => {
   }
   try {
     const targetUrl = new URL(target);
+    // Rewrite the incoming request URL so upstream does NOT see ?target=...
+    req.url = targetUrl.pathname + (targetUrl.search || '');
+
     const proxy = createProxyMiddleware({
       target: targetUrl.origin,
       changeOrigin: true,
       selfHandleResponse: false,
-      pathRewrite: {
-        '^/proxy': targetUrl.pathname + (targetUrl.search || '')
-      },
       logLevel: 'warn',
       onProxyRes: (proxyRes, req2, res2) => {
+        // Rewrite redirect Location headers to stay within proxy
+        const loc = proxyRes.headers['location'];
+        if (loc && (loc.startsWith('http://') || loc.startsWith('https://') || loc.startsWith('/'))) {
+          try {
+            let absolute;
+            if (loc.startsWith('/')) {
+              absolute = targetUrl.origin + loc;
+            } else {
+              absolute = loc;
+            }
+            proxyRes.headers['location'] = '/proxy?target=' + encodeURIComponent(absolute);
+          } catch (e) {
+            // ignore rewrite errors
+          }
+        }
         const end = process.hrtime.bigint();
         const durationMs = Number(end - req._startAt) / 1_000_000;
         recordHistory({
           method: req.method,
           url: target,
-          target_host: targetUrl.host,
+            target_host: targetUrl.host,
           status: proxyRes.statusCode,
           duration_ms: Math.round(durationMs),
           user_agent: req.headers['user-agent'] || '',
